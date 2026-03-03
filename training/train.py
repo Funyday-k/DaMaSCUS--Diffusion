@@ -192,4 +192,4 @@ if __name__ == "__main__":
     trainer = DiffusionTrainer(model=model, dataloader=dataloader, device=device, lr=1e-3)
 
     # FiLM 架构需要更多轮次收敛，建议 300 epochs
-    trainer.train(epochs=300)
+    trainer.train(epochs=50)
