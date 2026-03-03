@@ -142,11 +142,14 @@ if __name__ == "__main__":
         num_workers=0, pin_memory=False
     )
     
-    # 3. 初始化条件 Score Network
-    model = ConditionalScoreNetwork(state_dim=4, hidden_dim=256, time_emb_dim=128, num_layers=4)
-    
+    # 3. 初始化条件 Score Network（FiLM 架构，num_layers=6）
+    model = ConditionalScoreNetwork(state_dim=4, hidden_dim=256, time_emb_dim=128, num_layers=6)
+
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"模型参数量: {param_count:,}")
+
     # 4. 启动训练引擎
-    trainer = DiffusionTrainer(model=model, dataloader=dataloader, device=device, lr=1.6e-3)
-    
-    # 开始训练 100 轮 (根据你的数据量调整)
-    trainer.train(epochs=100)
+    trainer = DiffusionTrainer(model=model, dataloader=dataloader, device=device, lr=1e-3)
+
+    # FiLM 架构需要更多轮次收敛，建议 300 epochs
+    trainer.train(epochs=300)
