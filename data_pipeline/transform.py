@@ -59,6 +59,17 @@ class DamascusDataset(Dataset):
         self.X = (self.X - self.X_mean) / self.X_std
         self.Y = (self.Y - self.Y_mean) / self.Y_std
 
+    def to_device(self, device):
+        """将全部数据预加载到指定设备 (GPU)，消灭逐 batch 传输开销"""
+        self.X = self.X.to(device)
+        self.Y = self.Y.to(device)
+        if self.normalize:
+            self.X_mean = self.X_mean.to(device)
+            self.X_std = self.X_std.to(device)
+            self.Y_mean = self.Y_mean.to(device)
+            self.Y_std = self.Y_std.to(device)
+        return self
+
     def get_stats(self):
         """返回归一化参数，供未来生成(Inference)时还原物理单位"""
         return {

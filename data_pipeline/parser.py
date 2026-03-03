@@ -3,6 +3,8 @@ import glob
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 class DamascusParser:
     """
@@ -19,7 +21,7 @@ class DamascusParser:
     def parse_single_file(self, file_path):
         try:
             # 读取原始纯文本数据
-            df = pd.read_csv(file_path, delim_whitespace=True, header=None, names=self.columns)
+            df = pd.read_csv(file_path, sep=r'\s+', header=None, names=self.columns)
             
             # 计算能量差，定位碰撞点
             delta_E = df['E'].diff().abs()
@@ -39,20 +41,26 @@ class DamascusParser:
             print(f"解析 {file_path} 失败: {e}")
             return None, None
 
-    def run(self):
-        file_list = glob.glob(os.path.join(self.data_dir, "*.txt"))
+    def run(self, num_workers=None):
+        # 递归搜索所有子目录下的 txt 文件
+        file_list = glob.glob(os.path.join(self.data_dir, "**", "*.txt"), recursive=True)
         if not file_list:
             print(f"在 {self.data_dir} 未找到 txt 文件。")
             return
 
-        print(f"找到 {len(file_list)} 个文件，开始解析...")
+        if num_workers is None:
+            num_workers = min(multiprocessing.cpu_count(), len(file_list))
+
+        print(f"找到 {len(file_list)} 个文件，使用 {num_workers} 个进程并行解析...")
         all_in, all_out = [], []
         
-        for f in tqdm(file_list, desc="Processing files"):
-            s_in, s_out = self.parse_single_file(f)
-            if s_in is not None and len(s_in) > 0:
-                all_in.append(s_in)
-                all_out.append(s_out)
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(self.parse_single_file, f): f for f in file_list}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing files"):
+                s_in, s_out = future.result()
+                if s_in is not None and len(s_in) > 0:
+                    all_in.append(s_in)
+                    all_out.append(s_out)
                 
         if all_in:
             final_in = np.vstack(all_in)

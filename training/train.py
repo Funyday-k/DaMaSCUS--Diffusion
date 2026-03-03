@@ -4,10 +4,15 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import math
+import sys
+import os
 
-# 导入你之前写的模块 (假设它们在同一目录下)
+# 将项目根目录加入模块搜索路径
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# 导入你之前写的模块
 from data_pipeline.transform import DamascusDataset
-from mlp_score import ScoreNetwork
+from mlp_score import ConditionalScoreNetwork
 
 class DiffusionTrainer:
     """
@@ -47,10 +52,11 @@ class DiffusionTrainer:
         
         return sqrt_alpha_bar, sigma
 
-    def loss_fn(self, x0):
+    def loss_fn(self, x0, condition):
         """
-        核心物理损失函数：Denoising Score Matching
-        x0: 我们从数据集中取出的“真实物理状态” [r, v_rad, v_tan, E]
+        核心物理损失函数：Conditional Denoising Score Matching
+        x0:        碰撞后的真实物理状态 [r, v_rad, v_tan, E]
+        condition: 碰撞前的条件状态 [r, v_rad, v_tan, E]
         """
         batch_size = x0.shape[0]
         
@@ -68,9 +74,8 @@ class DiffusionTrainer:
         # 物理上：把粒子推向完全各向同性的热力学平衡态
         x_t = sqrt_alpha_bar * x0 + sigma * noise
         
-        # 5. 让神经网络预测被加入的噪声
-        # 我们把时间步 t 展平为 (batch_size,) 喂给模型
-        predicted_noise = self.model(x_t, t.squeeze(-1))
+        # 5. 让神经网络预测噪声，同时传入碰撞前状态作为条件
+        predicted_noise = self.model(x_t, t.squeeze(-1), condition)
         
         # 6. 计算均方误差 (MSE)
         # 网络预测的噪声越接近真实的噪声，说明它越理解这个物理系统的微观涨落
@@ -89,13 +94,13 @@ class DiffusionTrainer:
             pbar = tqdm(self.dataloader, desc=f"Epoch {epoch}/{epochs}", leave=False)
             
             for batch_x, batch_y in pbar:
-                # 在扩散模型中，我们通常是对目标状态 (batch_y) 进行建模
-                # 如果做条件扩散 (Conditional Diffusion)，batch_x 会作为额外条件传入网络
-                # 这里我们先展示无条件学习 batch_y 的物理分布
-                x0 = batch_y.to(self.device)
+                # 条件扩散: batch_x 是碰撞前状态 (condition), batch_y 是碰撞后状态 (target)
+                # 数据已预加载到 GPU，无需 .to(device)
+                condition = batch_x
+                x0 = batch_y
                 
-                self.optimizer.zero_grad()
-                loss = self.loss_fn(x0)
+                self.optimizer.zero_grad(set_to_none=True)
+                loss = self.loss_fn(x0, condition)
                 loss.backward()
                 
                 # 梯度裁剪，防止物理特征波动引发梯度爆炸
@@ -118,19 +123,30 @@ class DiffusionTrainer:
 # 执行主程序
 # ==========================================
 if __name__ == "__main__":
-    # 1. 设定计算设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # 1. 设定计算设备 (优先 CUDA > MPS > CPU)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     
     # 2. 准备数据管道 (使用我们之前写的 transform.py)
     print("正在加载并处理物理特征...")
     dataset = DamascusDataset("parsed_transitions.npz", normalize=True)
-    dataloader = DataLoader(dataset, batch_size=256, shuffle=True, drop_last=True)
+    # 将全部数据预加载到 GPU，消灭每 batch 的 CPU->GPU 传输瓶颈 (~160MB)
+    dataset.to_device(device)
+    print(f"全部数据已预加载到 {device} (约 {len(dataset)*4*2*4/1024**2:.0f} MB)")
+    dataloader = DataLoader(
+        dataset, batch_size=8192, shuffle=True, drop_last=True,
+        num_workers=0, pin_memory=False
+    )
     
-    # 3. 初始化 Score Network (4维物理相空间: r, v_rad, v_tan, E)
-    model = ScoreNetwork(state_dim=4, hidden_dim=256, time_emb_dim=128, num_layers=4)
+    # 3. 初始化条件 Score Network
+    model = ConditionalScoreNetwork(state_dim=4, hidden_dim=256, time_emb_dim=128, num_layers=4)
     
     # 4. 启动训练引擎
-    trainer = DiffusionTrainer(model=model, dataloader=dataloader, device=device, lr=2e-4)
+    trainer = DiffusionTrainer(model=model, dataloader=dataloader, device=device, lr=1.6e-3)
     
     # 开始训练 100 轮 (根据你的数据量调整)
     trainer.train(epochs=100)
