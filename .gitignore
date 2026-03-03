@@ -1,7 +1,22 @@
 .DS_Store
-.npz
-/__pycache__/
+
+# 数据文件（不上传到仓库）
+data/
+*.npz
+
+# 模型权重
 *.pth
 *.pt
 *.ckpt
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+.venv/
+venv/
+
+# 日志
 logs/
