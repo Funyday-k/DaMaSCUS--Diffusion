@@ -6,6 +6,34 @@ from tqdm import tqdm
 import math
 import sys
 import os
+import copy
+
+
+class EMA:
+    """
+    指数移动平均（Exponential Moving Average）模型权重。
+
+    每次 optimizer.step() 后调用 ema.update(model)，
+    EMA 权重以 decay 速率缓慢跟随训练权重，生成结果更稳定、方差更低。
+
+    公式：θ_ema ← decay × θ_ema + (1 − decay) × θ_model
+    """
+    def __init__(self, model: nn.Module, decay: float = 0.9999):
+        self.decay = decay
+        self.shadow = copy.deepcopy(model)  # EMA 权重的独立副本
+        self.shadow.eval()
+        # 不需要梯度
+        for p in self.shadow.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        """每个 optimizer step 后调用"""
+        for s_param, m_param in zip(self.shadow.parameters(), model.parameters()):
+            s_param.data.mul_(self.decay).add_(m_param.data, alpha=1.0 - self.decay)
+
+    def state_dict(self):
+        return self.shadow.state_dict()
 
 # 将项目根目录加入模块搜索路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -23,14 +51,17 @@ class DiffusionTrainer:
         self.model = model.to(device)
         self.dataloader = dataloader
         self.device = device
-        
+
         # 使用 AdamW 优化器，对物理数据拟合更稳定
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
-        
-        # 学习率调度器：余弦退火
+
+        # 学习率调度器：余弦退火（T_max 与 epochs 一致）
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=100, eta_min=1e-6
+            self.optimizer, T_max=300, eta_min=1e-6
         )
+
+        # EMA 跟踪模型权重，decay=0.9999 对 ~500K 步更新足够
+        self.ema = EMA(self.model, decay=0.9999)
 
     def compute_noise_schedule(self, t):
         """
@@ -102,11 +133,14 @@ class DiffusionTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 loss = self.loss_fn(x0, condition)
                 loss.backward()
-                
+
                 # 梯度裁剪，防止物理特征波动引发梯度爆炸
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
-                
+
+                # 每步更新 EMA 权重
+                self.ema.update(self.model)
+
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': f"{loss.item():.4f}"})
             
@@ -114,10 +148,16 @@ class DiffusionTrainer:
             avg_loss = total_loss / len(self.dataloader)
             print(f"Epoch {epoch} | Average Loss: {avg_loss:.6f} | LR: {self.scheduler.get_last_lr()[0]:.2e}")
             
-            # 定期保存模型权重
+            # 定期保存：同时保存训练权重和 EMA 权重
             if epoch % 10 == 0:
-                torch.save(self.model.state_dict(), f"damascus_diffusion_ep{epoch}.pth")
-                print(f"模型已保存 -> damascus_diffusion_ep{epoch}.pth")
+                ckpt = {
+                    "epoch":           epoch,
+                    "model_state_dict": self.model.state_dict(),
+                    "ema_state_dict":   self.ema.state_dict(),
+                    "optimizer_state":  self.optimizer.state_dict(),
+                }
+                torch.save(ckpt, f"damascus_diffusion_ep{epoch}.pth")
+                print(f"模型已保存 -> damascus_diffusion_ep{epoch}.pth  (含 EMA 权重)")
 
 # ==========================================
 # 执行主程序
