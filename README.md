@@ -1,22 +1,151 @@
 # DaMaSCUS--Diffusion
-This is a project that employs diffusion models to replace Monte Carlo methods for simulating the propagation of dark matter particles within the Sun.
 
-This our project tree
+**Replacing Monte Carlo with Diffusion Models for Dark Matter Simulation in the Sun**
+
+A conditional diffusion model that learns the scattering kernel of dark matter (DM) particles propagating through the Sun, trained on [DaMaSCUS-SUN](https://github.com/temken/DaMaSCUS-SUN) Monte Carlo trajectory data. Once trained, the model can generate post-scattering states orders of magnitude faster than traditional MC sampling, while preserving the exact gravitational dynamics and scattering rates from the Standard Solar Model (AGSS09).
+
+---
+
+## Physics Background
+
+When dark matter particles from the galactic halo enter the Sun, they undergo repeated scatterings with solar nuclei (H, He, O, Fe, …). Between scatterings, particles follow deterministic orbits in the solar gravitational potential $\Phi(r)$. Each scattering event changes the particle's velocity and energy:
+
+$$(\mathbf{r}, \mathbf{v}, E)_\text{before} \xrightarrow{\text{scatter}} (\mathbf{r}, \mathbf{v}', E')_\text{after}$$
+
+**DaMaSCUS-SUN** computes these transitions via Monte Carlo sampling of the scattering kinematics. **This project** replaces that MC step with a trained conditional diffusion model:
+
+| Component | DaMaSCUS-SUN (MC) | This Project (Diffusion) |
+|-----------|-------------------|--------------------------|
+| Gravitational propagation | Analytic orbit integration | Same (RK45 in solar potential) |
+| Scattering rate $\Gamma(r)$ | $\sum_i n_i(r)\,\sigma_i\,v$ | Same (from AGSS09 model) |
+| **Scattering outcome** | **MC sampling of kinematics** | **Conditional diffusion model** |
+| Speed per trajectory | ~seconds | ~milliseconds (after training) |
+
+---
+
+## Architecture
+
+The core model is a **FiLM-conditioned Score Network** that predicts noise $\epsilon$ given:
+- $\mathbf{x}_t$: noised post-scattering state
+- $t$: diffusion timestep
+- $\mathbf{c}$: pre-scattering condition $[r, v_\text{rad}, v_\text{tan}, E]$
+
+Each residual layer is modulated by the condition via **Feature-wise Linear Modulation (FiLM)**:
+
+$$\mathbf{h}' = \gamma(\mathbf{c}, t) \odot \text{LayerNorm}(\mathbf{h}) + \beta(\mathbf{c}, t)$$
+
+Key specs:
+- **Noise schedule**: VP-SDE with cosine schedule
+- **Hidden dim**: 256, **Layers**: 6 FiLM residual blocks
+- **Parameters**: ~1.8M
+- **EMA**: decay = 0.9999 for stable inference
+- **Sampling**: DDIM (50 steps) or DDPM (200 steps)
+
+---
+
+## Project Structure
 
 ```
-DaMaSCUS-Diffusion/
-├── data/                        # Raw trajectory data from DaMaSCUS-SUN simulations
-│   └── results_*/*.txt          # Trajectory files (trajectory_*_task*.txt)
-├── data_pipeline/               # 【Data Preprocessing Module】
-│   ├── parser.py                # Parses txt files, extracts scattering transitions → .npz
-│   └── transform.py             # Spherical coordinate transform + Z-score normalization
-├── sde_physics/                 # 【Physics Prior Module】(TBD)
-├── models/                      # 【Neural Network Module】(TBD)
-├── training/                    # 【Training Module】
-│   ├── mlp_score.py             # Conditional Score Network (residual MLP + time embedding)
-│   └── train.py                 # Diffusion model training engine (VP-SDE, cosine schedule)
-├── inference/                   # 【Generation and Evaluation Module】
-│   └── sampler.py               # Reverse SDE sampler (TBD)
+DaMaSCUS--Diffusion/
+├── data/                              # Raw data
+│   ├── model_agss09.dat               # AGSS09 Standard Solar Model (Serenelli+2009)
+│   └── results_*/*.txt                # DaMaSCUS-SUN trajectory files
+│
+├── data_pipeline/                     # Data preprocessing
+│   ├── parser.py                      # Multi-process parser: txt → npz (5.2M scattering events)
+│   └── transform.py                   # Cartesian→spherical + Z-score normalization (PyTorch Dataset)
+│
+├── sde_physics/                       # Physics core
+│   ├── solar_model.py                 # AGSS09 loader: T(r), ρ(r), Φ(r), n_i(r), v_esc(r)
+│   ├── free_streaming.py              # RK45 orbit integrator in solar gravitational potential
+│   └── scattering_rate.py             # SI cross-section with A² coherence enhancement
+│
+├── training/                          # Training pipeline
+│   ├── mlp_score.py                   # FiLM Conditional Score Network
+│   └── train.py                       # VP-SDE trainer with EMA + cosine LR scheduling
+│
+├── inference/                         # Inference & evaluation
+│   ├── sampler.py                     # DDIM/DDPM reverse diffusion sampler
+│   ├── evaluate.py                    # W₁ distance, distribution comparison, constraint checks
+│   └── trajectory_simulator.py        # Hybrid physics/ML end-to-end trajectory simulator
+│
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+```bash
+# Python 3.10+ with PyTorch
+pip install torch numpy pandas scipy tqdm matplotlib
+```
+
+### 1. Parse raw trajectory data
+
+```bash
+python data_pipeline/parser.py
+# → parsed_transitions.npz (~400MB, 5.2M scattering events)
+```
+
+### 2. Train the diffusion model
+
+```bash
+python training/train.py
+# Trains for 300 epochs on MPS/CUDA/CPU
+# Saves checkpoints: damascus_diffusion_ep{N}.pth (with EMA weights)
+```
+
+### 3. Evaluate generation quality
+
+```bash
+python inference/evaluate.py --n_samples 10000 --method ddim
+# Prints W₁ distances, relative errors, constraint violation rates
+# Saves evaluation_results.png
+```
+
+### 4. Run hybrid trajectory simulation
+
+```bash
+python inference/trajectory_simulator.py
+# Simulates DM trajectories: exact physics + ML scattering
+```
+
+### 5. Inspect the solar model
+
+```bash
+python sde_physics/solar_model.py
+# Prints T(r), ρ(r), Φ(r) profiles; saves solar_model_profiles.png
+```
+
+---
+
+## Data
+
+Training data is generated by [DaMaSCUS-SUN](https://github.com/temken/DaMaSCUS-SUN), which performs full Monte Carlo simulation of dark matter trajectories inside the Sun.
+
+Each trajectory file contains time-ordered particle states:
+
+| Column | Quantity | Unit |
+|--------|----------|------|
+| 1 | Step index | — |
+| 2 | Time | s |
+| 3–5 | Position (x, y, z) | km |
+| 6–8 | Velocity (vx, vy, vz) | km/s |
+| 9 | Energy | eV |
+| 10 | Radius | km |
+
+The parser identifies scattering events via energy discontinuities ($|\Delta E| > 10^{-5}$) and extracts (before, after) state pairs. These are converted to spherical features $[r, v_\text{rad}, v_\text{tan}, E]$ for training.
+
+---
+
+## References
+
+- **DaMaSCUS-SUN**: T. Emken, [arXiv:1706.02862](https://arxiv.org/abs/1706.02862), [GitHub](https://github.com/temken/DaMaSCUS-SUN)
+- **Standard Solar Model AGSS09**: Serenelli, Basu & Ferguson, [arXiv:0909.2668](https://arxiv.org/abs/0909.2668)
+- **Score-based Diffusion**: Song et al., [arXiv:2011.13456](https://arxiv.org/abs/2011.13456)
+- **FiLM Conditioning**: Perez et al., [arXiv:1709.07871](https://arxiv.org/abs/1709.07871)
+- **DDIM**: Song et al., [arXiv:2010.02502](https://arxiv.org/abs/2010.02502)
