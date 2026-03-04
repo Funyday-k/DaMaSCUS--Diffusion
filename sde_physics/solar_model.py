@@ -314,7 +314,8 @@ if __name__ == "__main__":
             ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        fig.savefig(os.path.join(ROOT, "solar_model_profiles.png"), dpi=150)
-        print("\n径向剖面图已保存 -> solar_model_profiles.png")
+        os.makedirs(os.path.join(ROOT, "outputs"), exist_ok=True)
+        fig.savefig(os.path.join(ROOT, "outputs", "solar_model_profiles.png"), dpi=150)
+        print("\n径向剖面图已保存 -> outputs/solar_model_profiles.png")
     except ImportError:
         print("\n(matplotlib 未安装，跳过绘图)")

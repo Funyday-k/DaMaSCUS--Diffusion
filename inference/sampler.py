@@ -216,9 +216,12 @@ class DarkMatterSampler:
 if __name__ == "__main__":
     import glob
 
-    # 找到最新的模型权重文件
+    # 找到最新的模型权重文件（优先 checkpoints/ 子目录，兼容根目录旧版本）
     ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    pth_files = sorted(glob.glob(os.path.join(ROOT, "damascus_diffusion_ep*.pth")))
+    pth_files = sorted(
+        glob.glob(os.path.join(ROOT, "checkpoints", "damascus_diffusion_ep*.pth")) +
+        glob.glob(os.path.join(ROOT, "damascus_diffusion_ep*.pth")),
+        key=lambda f: int(os.path.basename(f).split('ep')[1].split('.')[0]))
     if not pth_files:
         print("未找到模型权重文件，请先运行 training/train.py 完成训练。")
         exit(1)

@@ -44,6 +44,12 @@ from sde_physics.free_streaming import FreeStreamer
 from sde_physics.scattering_rate import ScatteringPhysics
 from inference.sampler import DarkMatterSampler
 
+# 能量单位换算常数: 1 GeV/c² 粒子 × 1 km²/s² 的比动能 = ? eV
+# E [eV] = m_chi [GeV] * specific_energy [km²/s²] * EV_PER_GEV_KM2S2
+#   推导: m[kg] = m_GeV × 1.78e-27, E[J] = m × v_specific × 1e6
+#          E[eV] = E[J] / 1.602e-19
+EV_PER_GEV_KM2S2 = 1.78266192e-27 * 1e6 / 1.602176634e-19  # ≈ 0.01113
+
 
 class TrajectorySimulator:
     """
@@ -76,7 +82,7 @@ class TrajectorySimulator:
                  solar_model_path: str,
                  m_chi_GeV: float = 1.0,
                  sigma_p_cm2: float = 1e-35,
-                 dt_step: float = 1.0):
+                 dt_step: float = 10.0):
         """
         参数：
             model_checkpoint:  扩散模型权重路径
@@ -168,10 +174,15 @@ class TrajectorySimulator:
                     }
 
                 # 如果在太阳内部，累积光学深度
+                # 使用正确的散射物理：Σ_i n_i(r) × σ_i × v
+                # 其中 σ_i = σ_p × A_i² × (μ_i/μ_p)²（相干增强）
                 if r_new < R_SUN_KM:
-                    v_cm_s = v_mag * 1e5
-                    n_total = float(self.sun.total_number_density(r_new))
-                    dtau = n_total * self.sigma_p * v_cm_s * self.dt_step
+                    rate = float(np.squeeze(
+                        self.scattering.scattering_rate(
+                            np.atleast_1d(r_new), v_mag
+                        )
+                    ))
+                    dtau = rate * self.dt_step
                     tau_accum += dtau
 
                 r, vr, vt = r_new, vr_new, vt_new
@@ -201,7 +212,9 @@ class TrajectorySimulator:
             trajectory.append([r, vr, vt, E, t_total])
 
             # 检查捕获（能量足够低→粒子被束缚）
-            v_esc_local = float(self.sun.escape_velocity(r))
+            v_esc_local = float(np.squeeze(
+                self.sun.escape_velocity(np.atleast_1d(r))
+            ))
             v_total = np.sqrt(vr ** 2 + vt ** 2)
             if v_total < 0.01 * v_esc_local:
                 return {
@@ -260,9 +273,11 @@ class TrajectorySimulator:
             # 太阳表面入射
             r_init = R_SUN_KM
 
-            # 初始能量（DaMaSCUS 约定，由训练数据决定）
-            # 这里用 ½v² 作为代理，实际单位换算由模型学习
-            E_init = 0.5 * v ** 2
+            # 初始能量 [eV]：总能量 = 动能 + 引力势能
+            # DaMaSCUS 约定：E_total = m_chi × (½v² + Φ(r)) 转换为 eV
+            v_sq = v_rad ** 2 + v_tan ** 2
+            phi = float(self.sun.grav_potential(np.array([r_init])))
+            E_init = self.m_chi * (0.5 * v_sq + phi) * EV_PER_GEV_KM2S2
 
             traj = self.simulate_single(
                 r_init=r_init,
@@ -291,8 +306,11 @@ class TrajectorySimulator:
 if __name__ == "__main__":
     import glob
 
-    # 寻找最新模型权重
-    pth_files = sorted(glob.glob(os.path.join(ROOT, "damascus_diffusion_ep*.pth")))
+    # 寻找最新模型权重（优先 checkpoints/ 子目录，兼容根目录旧版本）
+    pth_files = sorted(
+        glob.glob(os.path.join(ROOT, "checkpoints", "damascus_diffusion_ep*.pth")) +
+        glob.glob(os.path.join(ROOT, "damascus_diffusion_ep*.pth")),
+        key=lambda f: int(os.path.basename(f).split('ep')[1].split('.')[0]))
     if not pth_files:
         print("未找到模型权重文件。请先运行 training/train.py")
         sys.exit(1)

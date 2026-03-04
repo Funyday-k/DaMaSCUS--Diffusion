@@ -156,8 +156,13 @@ class DiffusionTrainer:
                     "ema_state_dict":   self.ema.state_dict(),
                     "optimizer_state":  self.optimizer.state_dict(),
                 }
-                torch.save(ckpt, f"damascus_diffusion_ep{epoch}.pth")
-                print(f"模型已保存 -> damascus_diffusion_ep{epoch}.pth  (含 EMA 权重)")
+                # 统一保存到项目根目录下的 checkpoints/ 子目录
+                _root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                _ckpt_dir = os.path.join(_root, "checkpoints")
+                os.makedirs(_ckpt_dir, exist_ok=True)
+                _ckpt_path = os.path.join(_ckpt_dir, f"damascus_diffusion_ep{epoch}.pth")
+                torch.save(ckpt, _ckpt_path)
+                print(f"模型已保存 -> checkpoints/damascus_diffusion_ep{epoch}.pth  (含 EMA 权重)")
 
 # ==========================================
 # 执行主程序
@@ -192,4 +197,4 @@ if __name__ == "__main__":
     trainer = DiffusionTrainer(model=model, dataloader=dataloader, device=device, lr=1e-3)
 
     # FiLM 架构需要更多轮次收敛，建议 300 epochs
-    trainer.train(epochs=50)
+    trainer.train(epochs=100)

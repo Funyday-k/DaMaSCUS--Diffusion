@@ -264,8 +264,11 @@ if __name__ == "__main__":
                         help='采样步数')
     args = parser.parse_args()
 
-    # 找到最新模型权重
-    pth_files = sorted(glob.glob(os.path.join(ROOT, "damascus_diffusion_ep*.pth")))
+    # 找到最新模型权重（优先 checkpoints/ 子目录，兼容根目录旧版本）
+    pth_files = sorted(
+        glob.glob(os.path.join(ROOT, "checkpoints", "damascus_diffusion_ep*.pth")) +
+        glob.glob(os.path.join(ROOT, "damascus_diffusion_ep*.pth")),
+        key=lambda f: int(os.path.basename(f).split('ep')[1].split('.')[0]))
     if not pth_files:
         print("未找到模型权重文件。请先运行 training/train.py")
         sys.exit(1)
@@ -293,6 +296,7 @@ if __name__ == "__main__":
     # 打印报告
     print_report(results)
 
-    # 保存图表
+    # 保存图表到 outputs/ 目录
+    os.makedirs(os.path.join(ROOT, "outputs"), exist_ok=True)
     save_plots(results, cond_phys, target_phys,
-               os.path.join(ROOT, "evaluation_results.png"))
+               os.path.join(ROOT, "outputs", "evaluation_results.png"))
