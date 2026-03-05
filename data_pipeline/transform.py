@@ -15,8 +15,12 @@ class DamascusDataset(Dataset):
         raw_out = data['states_out']
         
         # 2. 向量化物理坐标转换 (Cartesian -> Spherical)
-        features_in = self._to_spherical(raw_in)
-        features_out = self._to_spherical(raw_out)
+        features_in = self._to_spherical(raw_in)       # [r, v_rad, v_tan, E]  (4D)
+        features_out = self._to_velocity_residual(raw_in, raw_out)  # [Δv_rad, Δv_tan]  (2D)
+        # 散射物理：
+        #   - r 不变（瞬时过程）
+        #   - E 由 (v, r, Φ) 解析确定，不是独立自由度
+        #   - 模型只预测速度残差 Δv_rad, Δv_tan，以 0 为中心，易于学习
         
         # 将 Numpy 转换为 PyTorch Tensor
         self.X = torch.tensor(features_in, dtype=torch.float32)
@@ -48,6 +52,37 @@ class DamascusDataset(Dataset):
         
         # 拼装为特征矩阵 [r, v_rad, v_tan, E]
         return np.column_stack((r, v_rad, v_tan, E))
+
+    def _to_velocity_residual(self, states_in, states_out):
+        """
+        计算速度残差 [Δv_rad, Δv_tan] = v_out - v_in。
+        
+        物理动机：
+          - 散射是小扰动，Δv 以 0 为中心，方差更小，模型更容易学习
+          - r 不变（瞬时散射）
+          - E 由 (v, r, Φ) 解析确定，不作为输出
+        """
+        # 碰撞前球坐标
+        pos_in = states_in[:, 2:5]
+        vel_in = states_in[:, 5:8]
+        r_in = states_in[:, 9]
+        v_rad_in = np.sum(pos_in * vel_in, axis=1) / r_in
+        v_mag_sq_in = np.sum(vel_in**2, axis=1)
+        v_tan_in = np.sqrt(np.maximum(0, v_mag_sq_in - v_rad_in**2))
+        
+        # 碰撞后球坐标
+        pos_out = states_out[:, 2:5]
+        vel_out = states_out[:, 5:8]
+        r_out = states_out[:, 9]
+        v_rad_out = np.sum(pos_out * vel_out, axis=1) / r_out
+        v_mag_sq_out = np.sum(vel_out**2, axis=1)
+        v_tan_out = np.sqrt(np.maximum(0, v_mag_sq_out - v_rad_out**2))
+        
+        # 速度残差
+        dv_rad = v_rad_out - v_rad_in   # 可正可负
+        dv_tan = v_tan_out - v_tan_in   # 可正可负（归一化后无需 clamp）
+        
+        return np.column_stack((dv_rad, dv_tan))
 
     def _apply_normalization(self):
         """缩放特征到以 0 为中心，防止梯度爆炸"""
@@ -91,4 +126,6 @@ if __name__ == "__main__":
     x_batch, y_batch = next(iter(dataloader))
     print(f"数据管道构建成功！")
     print(f"输入 Batch Shape: {x_batch.shape} (r, v_rad, v_tan, E)")
-    print(f"输出 Batch Shape: {y_batch.shape}")
+    print(f"输出 Batch Shape: {y_batch.shape} (Δv_rad, Δv_tan) — 速度残差")
+    print(f"  Δv_rad 均值: {y_batch[:, 0].mean():.4f}, 标准差: {y_batch[:, 0].std():.4f}")
+    print(f"  Δv_tan 均值: {y_batch[:, 1].mean():.4f}, 标准差: {y_batch[:, 1].std():.4f}")

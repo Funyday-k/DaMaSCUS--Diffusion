@@ -28,18 +28,20 @@ def cosine_schedule(t: torch.Tensor):
 @torch.no_grad()
 def ddpm_sample(model: ConditionalScoreNetwork,
                 condition: torch.Tensor,
+                target_dim: int = 3,
                 num_steps: int = 200,
                 device: torch.device = torch.device("cpu")) -> torch.Tensor:
     """
     DDPM 逆扩散采样。
-    condition: (B, 4)  归一化后的碰撞前状态 [r, v_rad, v_tan, E]
-    返回:      (B, 4)  归一化后的碰撞后状态（采样结果）
+    condition:  (B, cond_dim)   归一化后的碰撞前状态 [r, v_rad, v_tan, E]
+    target_dim: 目标状态维度（默认 3: [v_rad, v_tan, E])
+    返回:       (B, target_dim) 归一化后的碰撞后状态
     """
     model.eval()
-    B, D = condition.shape
+    B = condition.shape[0]
 
     # 从纯高斯噪声出发 x_T ~ N(0, I)
-    x = torch.randn(B, D, device=device)
+    x = torch.randn(B, target_dim, device=device)
 
     # 离散化时间步 t: 1 → 0
     timesteps = torch.linspace(1.0, 1e-3, num_steps, device=device)
@@ -82,17 +84,19 @@ def ddpm_sample(model: ConditionalScoreNetwork,
 @torch.no_grad()
 def ddim_sample(model: ConditionalScoreNetwork,
                 condition: torch.Tensor,
+                target_dim: int = 3,
                 num_steps: int = 50,
                 eta: float = 0.0,
                 device: torch.device = torch.device("cpu")) -> torch.Tensor:
     """
     DDIM 采样（eta=0 时完全确定性，eta=1 时退化为 DDPM）。
-    condition: (B, 4)  归一化后的碰撞前状态
-    返回:      (B, 4)  归一化后的碰撞后状态
+    condition:  (B, cond_dim) 归一化后的碰撞前状态
+    target_dim: 目标状态维度（默认 3)
+    返回:       (B, target_dim) 归一化后的碰撞后状态
     """
     model.eval()
-    B, D = condition.shape
-    x = torch.randn(B, D, device=device)
+    B = condition.shape[0]
+    x = torch.randn(B, target_dim, device=device)
 
     timesteps = torch.linspace(1.0, 1e-3, num_steps, device=device)
 
@@ -129,9 +133,18 @@ class DarkMatterSampler:
     """
     端到端推理接口：
     输入碰撞前物理状态 (原始单位)，输出模型生成的碰撞后物理状态。
+
+    物理约束：散射是瞬时过程，不改变位置 r。
+    模型仅预测 [Δv_rad, Δv_tan]（速度残差，2D），
+    sample() 返回完整的 [r, v_rad, v_tan, E]：
+      - r:     从 condition 透传
+      - v_rad: v_rad_in + Δv_rad
+      - v_tan: max(0, v_tan_in + Δv_tan)
+      - E:     NaN（由调用方从物理公式计算）
     """
     def __init__(self, checkpoint_path: str, npz_path: str,
-                 state_dim=4, hidden_dim=256, time_emb_dim=128, num_layers=6):
+                 state_dim=2, cond_dim=4, hidden_dim=256,
+                 time_emb_dim=128, num_layers=6):
 
         # 设备选择
         if torch.cuda.is_available():
@@ -143,9 +156,13 @@ class DarkMatterSampler:
 
         print(f"推理设备: {self.device}")
 
+        self.state_dim = state_dim  # 目标维度 (2: Δv_rad, Δv_tan)
+        self.cond_dim  = cond_dim   # 条件维度 (4: r, v_rad, v_tan, E)
+
         # 加载模型权重
         self.model = ConditionalScoreNetwork(
             state_dim=state_dim,
+            cond_dim=cond_dim,
             hidden_dim=hidden_dim,
             time_emb_dim=time_emb_dim,
             num_layers=num_layers
@@ -195,19 +212,44 @@ class DarkMatterSampler:
         condition_physical: (B, 4) 碰撞前状态，物理单位 [r, v_rad, v_tan, E]
         method: "ddim"（快速，默认）或 "ddpm"（随机）
         返回: (B, 4) 碰撞后状态，物理单位 [r, v_rad, v_tan, E]
+
+        物理约束：
+          - 模型预测速度残差 [Δv_rad, Δv_tan]（2D）
+          - r 不变（瞬时散射）
+          - E 由 (v, r, Φ) 解析计算 → 始终与速度自洽
+          - v_tan ≥ 0（物理约束）
         """
         condition_norm = self._normalize_input(condition_physical)
 
         if method == "ddim":
             y_norm = ddim_sample(self.model, condition_norm,
+                                 target_dim=self.state_dim,
                                  num_steps=num_steps, eta=0.0, device=self.device)
         elif method == "ddpm":
             y_norm = ddpm_sample(self.model, condition_norm,
+                                 target_dim=self.state_dim,
                                  num_steps=num_steps, device=self.device)
         else:
             raise ValueError(f"未知采样方法: {method}，请选择 'ddim' 或 'ddpm'")
 
-        return self._denormalize_output(y_norm)
+        # 反归一化得到物理单位的 [Δv_rad, Δv_tan]
+        delta_v = self._denormalize_output(y_norm)  # (B, 2)
+
+        # 从 condition 中提取碰撞前速度
+        r       = condition_physical[:, 0:1].to(delta_v.device)  # (B, 1)
+        v_rad_in = condition_physical[:, 1:2].to(delta_v.device)  # (B, 1)
+        v_tan_in = condition_physical[:, 2:3].to(delta_v.device)  # (B, 1)
+
+        # 碰撞后速度 = 碰撞前 + 残差
+        v_rad_out = v_rad_in + delta_v[:, 0:1]          # 可正可负
+        v_tan_out = torch.clamp(v_tan_in + delta_v[:, 1:2], min=0.0)  # v_tan ≥ 0
+
+        # E 从物理公式计算，不由模型预测
+        # 调用方（trajectory_simulator）会在拿到 v 后自行计算 E
+        # 这里用 NaN 占位，提示下游不要使用这个值
+        E_placeholder = torch.full_like(r, float('nan'))
+
+        return torch.cat([r, v_rad_out, v_tan_out, E_placeholder], dim=-1)  # (B, 4)
 
 
 # ─────────────────────────────────────────────
@@ -257,18 +299,18 @@ if __name__ == "__main__":
     result = sampler.sample(condition_phys, method="ddim", num_steps=50)
     pred = result.cpu().numpy()
 
-    print(f"\n模型生成的碰撞后状态 (物理单位) [r, v_rad, v_tan, E]:")
+    print(f"\n模型生成的碰撞后状态 (物理单位) [r, v_rad, v_tan, E(NaN=待计算)]:")
     print(pred)
 
     print(f"\n真实碰撞后状态 (地面真值):")
     print(truth)
 
-    # 逐特征相对误差
-    rel_err = np.abs(pred - truth) / (np.abs(truth) + 1e-8)
-    labels = ["r", "v_rad", "v_tan", "E"]
-    print("\n各特征平均相对误差:")
+    # 逐特征相对误差 (只比较 v_rad, v_tan，E 需从物理公式计算)
+    labels = ["r", "v_rad", "v_tan"]
+    print("\n各特征平均相对误差 (r 为透传，v_rad/v_tan 为模型预测):")
     for i, lbl in enumerate(labels):
-        print(f"  {lbl:6s}: {rel_err[:, i].mean()*100:.2f}%")
+        rel_err = np.abs(pred[:, i] - truth[:, i]) / (np.abs(truth[:, i]) + 1e-8)
+        print(f"  {lbl:6s}: {rel_err.mean()*100:.2f}%")
 
     # 物理约束检查
     n_neg_vtan = (pred[:, 2] < 0).sum()

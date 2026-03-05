@@ -79,6 +79,8 @@ def evaluate_single_step(sampler: DarkMatterSampler,
                           batch_size: int = 2048) -> dict:
     """
     单步散射评估：给定真实 condition，生成 output，对比真实 output。
+    模型输出 [Δv_rad, Δv_tan] → sampler 重构为 [r, v_rad, v_tan, E(NaN)]。
+    此处将 E 从物理公式补全后再评估。
     """
     n = len(cond_phys)
     generated = []
@@ -91,18 +93,18 @@ def evaluate_single_step(sampler: DarkMatterSampler,
         generated.append(gen_batch.cpu().numpy())
 
     gen_phys = np.vstack(generated)
+    # gen_phys[:,3] 是 NaN（E 待计算），这里不使用 E 做评估
 
-    # ── 1. 各特征的 Wasserstein-1 距离 ──
-    feature_names = ['r', 'v_rad', 'v_tan', 'E']
+    # ── 1. 各特征的 Wasserstein-1 距离（只评估 r, v_rad, v_tan）──
+    feature_names = ['r', 'v_rad', 'v_tan']
     w1_distances = {}
     for i, name in enumerate(feature_names):
         w1 = compute_wasserstein1(gen_phys[:, i], target_phys[:, i])
-        # 相对 W1（除以真实分布的标准差）
         scale = np.std(target_phys[:, i]) + 1e-8
         w1_distances[name] = {'absolute': w1, 'relative': w1 / scale}
 
-    # ── 2. 逐样本相对误差 ──
-    rel_err = np.abs(gen_phys - target_phys) / (np.abs(target_phys) + 1e-8)
+    # ── 2. 逐样本相对误差（r, v_rad, v_tan）──
+    rel_err = np.abs(gen_phys[:, :3] - target_phys[:, :3]) / (np.abs(target_phys[:, :3]) + 1e-8)
     mean_rel_err = {name: float(rel_err[:, i].mean())
                     for i, name in enumerate(feature_names)}
     median_rel_err = {name: float(np.median(rel_err[:, i]))
@@ -112,18 +114,12 @@ def evaluate_single_step(sampler: DarkMatterSampler,
     n_neg_vtan   = int((gen_phys[:, 2] < 0).sum())
     n_neg_r      = int((gen_phys[:, 0] < 0).sum())
 
-    # Δr 应当很小（散射是瞬时的）
-    dr = np.abs(gen_phys[:, 0] - cond_phys[:, 0])
-    dr_frac = dr / (cond_phys[:, 0] + 1e-8)
-
     constraints = {
         'v_tan < 0':    n_neg_vtan / n * 100,
         'r < 0':        n_neg_r / n * 100,
-        'Δr/r > 10%':   float((dr_frac > 0.1).sum()) / n * 100,
-        'Δr/r > 50%':   float((dr_frac > 0.5).sum()) / n * 100,
     }
 
-    # ── 4. 各特征统计 ──
+    # ── 4. 各特征统计（只评估 r, v_rad, v_tan）──
     stats = {}
     for i, name in enumerate(feature_names):
         stats[name] = {
@@ -158,7 +154,7 @@ def print_report(results: dict):
     print("\n2. 逐样本相对误差:")
     print(f"   {'特征':>8} {'平均':>12} {'中位数':>12}")
     print("   " + "-" * 36)
-    for name in ['r', 'v_rad', 'v_tan', 'E']:
+    for name in ['r', 'v_rad', 'v_tan']:
         mean = results['mean_rel_err'][name]
         med  = results['median_rel_err'][name]
         print(f"   {name:>8} {mean*100:11.2f}% {med*100:11.2f}%")
@@ -188,14 +184,14 @@ def save_plots(results: dict, cond_phys: np.ndarray, target_phys: np.ndarray,
         return
 
     gen = results['generated']
-    feature_names = ['r [km]', 'v_rad [km/s]', 'v_tan [km/s]', 'E [eV]']
+    feature_names = ['r [km]', 'v_rad [km/s]', 'v_tan [km/s]']
+    feature_keys  = ['r', 'v_rad', 'v_tan']
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
-    # ── 第一行：边缘分布直方图 ──
-    for i in range(4):
+    # ── 第一行：边缘分布直方图（r, v_rad, v_tan）──
+    for i in range(3):
         ax = axes[0, i]
-        # 统一取 1-99 百分位确定范围
         all_vals = np.concatenate([gen[:, i], target_phys[:, i]])
         lo, hi = np.percentile(all_vals, [1, 99])
         bins = np.linspace(lo, hi, 80)
@@ -208,14 +204,13 @@ def save_plots(results: dict, cond_phys: np.ndarray, target_phys: np.ndarray,
         ax.set_ylabel('概率密度')
         ax.legend(fontsize=8)
 
-        w1_rel = results['w1_distances'][['r','v_rad','v_tan','E'][i]]['relative']
+        w1_rel = results['w1_distances'][feature_keys[i]]['relative']
         ax.set_title(f'W₁/σ = {w1_rel:.4f}')
 
     # ── 第二行：条件响应散点图 ──
     scatter_pairs = [
         (0, 0, 'r_in → r_out'),
         (1, 1, 'v_rad_in → v_rad_out'),
-        (3, 3, 'E_in → E_out'),
     ]
     for j, (ci, ti, title) in enumerate(scatter_pairs):
         ax = axes[1, j]
@@ -224,23 +219,23 @@ def save_plots(results: dict, cond_phys: np.ndarray, target_phys: np.ndarray,
                    s=1, alpha=0.3, label='MC 真实', color='steelblue')
         ax.scatter(cond_phys[:n_plot, ci], gen[:n_plot, ti],
                    s=1, alpha=0.3, label='扩散模型', color='coral')
-        ax.set_xlabel(f'{["r","v_rad","v_tan","E"][ci]}_in')
-        ax.set_ylabel(f'{["r","v_rad","v_tan","E"][ti]}_out')
+        ax.set_xlabel(f'{feature_keys[ci]}_in')
+        ax.set_ylabel(f'{feature_keys[ti]}_out')
         ax.set_title(title)
         ax.legend(fontsize=7, markerscale=5)
 
-    # 第二行第四个：ΔE 分布
-    ax = axes[1, 3]
-    dE_truth = target_phys[:, 3] - cond_phys[:, 3]
-    dE_gen   = gen[:, 3] - cond_phys[:, 3]
-    lo, hi = np.percentile(np.concatenate([dE_truth, dE_gen]), [1, 99])
+    # 第二行第三个：Δv_rad 残差分布
+    ax = axes[1, 2]
+    dv_rad_truth = target_phys[:, 1] - cond_phys[:, 1]
+    dv_rad_gen   = gen[:, 1] - cond_phys[:, 1]
+    lo, hi = np.percentile(np.concatenate([dv_rad_truth, dv_rad_gen]), [1, 99])
     bins = np.linspace(lo, hi, 80)
-    ax.hist(dE_truth, bins=bins, density=True,
-            alpha=0.6, label='MC ΔE', color='steelblue')
-    ax.hist(dE_gen, bins=bins, density=True,
-            alpha=0.6, label='模型 ΔE', color='coral')
-    ax.set_xlabel('ΔE [eV]')
-    ax.set_title('能量转移分布')
+    ax.hist(dv_rad_truth, bins=bins, density=True,
+            alpha=0.6, label='MC Δv_rad', color='steelblue')
+    ax.hist(dv_rad_gen, bins=bins, density=True,
+            alpha=0.6, label='模型 Δv_rad', color='coral')
+    ax.set_xlabel('Δv_rad [km/s]')
+    ax.set_title('径向速度变化分布')
     ax.legend(fontsize=8)
 
     plt.tight_layout()

@@ -97,11 +97,18 @@ class ConditionalScoreNetwork(nn.Module):
       predicted_noise (B, state_dim)
     """
     def __init__(self,
-                 state_dim:    int = 4,
+                 state_dim:    int = 3,
+                 cond_dim:     int = 4,
                  hidden_dim:   int = 256,
                  time_emb_dim: int = 128,
                  num_layers:   int = 6):
+        """
+        state_dim:  目标状态维度（散射后 [v_rad, v_tan, E]，默认 3）
+        cond_dim:   条件状态维度（散射前 [r, v_rad, v_tan, E]，默认 4）
+        """
         super().__init__()
+        self.state_dim = state_dim
+        self.cond_dim  = cond_dim
 
         # --- 时间编码 ---
         self.time_mlp = nn.Sequential(
@@ -112,8 +119,9 @@ class ConditionalScoreNetwork(nn.Module):
         )
 
         # --- 条件编码器（独立于时间，赋予 condition 充分的表达空间）---
+        # 条件维度 (cond_dim=4) 与目标维度 (state_dim=3) 解耦
         self.cond_encoder = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+            nn.Linear(cond_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
@@ -147,9 +155,9 @@ class ConditionalScoreNetwork(nn.Module):
                 time:      torch.Tensor,
                 condition: torch.Tensor) -> torch.Tensor:
         """
-        x_t:       (B, state_dim) 加噪后的目标状态（碰撞后）
+        x_t:       (B, state_dim) 加噪后的目标状态（碰撞后 [v_rad, v_tan, E]）
         time:      (B,)           扩散时间步 ∈ [0, 1]
-        condition: (B, state_dim) 干净的条件状态（碰撞前）
+        condition: (B, cond_dim)  干净的条件状态（碰撞前 [r, v_rad, v_tan, E]）
         Returns:   (B, state_dim) 预测的噪声 ε
         """
         # 时间嵌入 & 条件嵌入

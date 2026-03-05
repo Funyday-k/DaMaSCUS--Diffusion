@@ -197,17 +197,23 @@ class TrajectorySimulator:
                 }
 
             # ─── 步骤 3: 散射！用扩散模型生成碰撞后状态 ───
+            # 模型仅预测 [v_rad, v_tan, E]，r 不变（散射是瞬时过程）
             condition = torch.tensor(
                 [[r, vr, vt, E]], dtype=torch.float32
             )
             result = self.sampler.sample(condition, method="ddim", num_steps=50)
             result_np = result.cpu().numpy()[0]
 
-            # 更新状态
-            r  = max(float(result_np[0]), 1.0)  # r ≥ 0
+            # 更新状态：r 保持不变（由 sampler 从 condition 中透传）
+            # result_np = [r, v_rad, v_tan, E]
             vr = float(result_np[1])
             vt = max(float(result_np[2]), 0.0)  # v_tan ≥ 0
-            E  = float(result_np[3])
+
+            # ★ 物理约束：E 不使用模型输出，而是从 (v, r, Φ) 解析计算
+            # 这确保 condition 中的 E 与 v 始终自洽，防止分布偏移
+            v_sq = vr ** 2 + vt ** 2
+            phi = float(self.sun.grav_potential(np.array([r])))
+            E = self.m_chi * (0.5 * v_sq + phi) * EV_PER_GEV_KM2S2
 
             trajectory.append([r, vr, vt, E, t_total])
 
@@ -329,7 +335,7 @@ if __name__ == "__main__":
 
     # 模拟 5 条测试轨迹
     print("\n开始模拟测试轨迹...")
-    results = sim.simulate_batch(n_trajectories=5, seed=2024)
+    results = sim.simulate_batch(n_trajectories=50, seed=2024)
 
     for i, res in enumerate(results):
         traj = res['trajectory']

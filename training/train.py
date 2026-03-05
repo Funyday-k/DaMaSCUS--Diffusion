@@ -188,7 +188,11 @@ if __name__ == "__main__":
     )
     
     # 3. 初始化条件 Score Network（FiLM 架构，num_layers=6）
-    model = ConditionalScoreNetwork(state_dim=4, hidden_dim=256, time_emb_dim=128, num_layers=6)
+    # state_dim=2: 目标仅预测 [Δv_rad, Δv_tan]（速度残差）
+    #   - r 不变（瞬时散射）
+    #   - E 由 (v, r, Φ) 解析计算，不是独立自由度
+    # cond_dim=4:  条件包含完整 [r, v_rad, v_tan, E]
+    model = ConditionalScoreNetwork(state_dim=2, cond_dim=4, hidden_dim=256, time_emb_dim=128, num_layers=6)
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"模型参数量: {param_count:,}")
